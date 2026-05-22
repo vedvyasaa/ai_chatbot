@@ -29,6 +29,9 @@ def create_embeddings(properties):
 
 
 def build_faiss_index(embeddings):
+    # Ensure embeddings is a 2D numpy array
+    if embeddings is None or getattr(embeddings, 'size', 0) == 0:
+        raise ValueError("Embeddings must be a non-empty numpy array")
 
     dimension = embeddings.shape[1]
 
@@ -50,7 +53,13 @@ def semantic_search(query, properties, index):
 
     result = []
 
+    if indices is None or len(indices) == 0:
+        return []
+
     for idx in indices[0]:
+        if idx is None or idx < 0 or idx >= len(properties):
+            continue
+
         result.append(properties[idx])
 
     return result

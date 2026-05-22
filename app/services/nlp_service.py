@@ -9,15 +9,14 @@ def extract_preferences(message: str):
     bhk = None
     budget = None
 
-    location = [
+    locations = [
         "mumbai",
         "pune",
         "delhi",
         "bangalore"
     ]
 
-    for city in location:
-
+    for city in locations:
         if city in message_lower:
             location = city.title()
 

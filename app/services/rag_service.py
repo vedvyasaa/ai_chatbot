@@ -68,8 +68,15 @@ def search_similar_chunks(
 
     results = []
 
+    # indices is a 2D array (batch x top_k). Guard against empty indices
+    if indices is None or len(indices) == 0:
+        return []
+
     for idx in indices[0]:
+        # FAISS may return -1 for missing results; guard index range
+        if idx is None or idx < 0 or idx >= len(chunks):
+            continue
 
         results.append(chunks[idx])
 
-        return results
+    return results

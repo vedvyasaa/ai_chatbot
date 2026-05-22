@@ -14,6 +14,15 @@ from app.services.property_service import search_properties
 from app.services.nlp_service import extract_preferences
 from app.services.vector_service import (
     create_embeddings, build_faiss_index, semantic_search)
+from app.services.chroma_service import (
+    store_document_chunks,
+    search_document
+)
+from app.services.rag_service import model
+from app.services.agent_service import (
+    detect_intent,
+    decide_tools
+)
 from app.db.database import SessionLocal
 from app.models.chat_model import ChatHistory
 from app.models.user_model import User
@@ -21,9 +30,6 @@ from app.models.conversation_model import Conversation
 from app.models.property_model import Property
 
 app = FastAPI()
-
-document_chunks = []
-document_index = None
 
 
 class ChatRequest(BaseModel):
@@ -57,16 +63,15 @@ def home():
 @app.post("/chat")
 def chat(request: ChatRequest):
 
-    global document_chunks
-    global document_index
-
     db = SessionLocal()
 
     try:
 
         previous_chats = db.query(ChatHistory).filter(
             ChatHistory.conversation_id == request.conversation_id
-        ).all()
+        ).order_by(
+            ChatHistory.id.desc()
+        ).limit(5).all()
 
         messages = [
             {
@@ -92,6 +97,15 @@ def chat(request: ChatRequest):
             "content": request.message
         })
 
+        intent = detect_intent(
+            request.message
+        )
+
+        tools = decide_tools(intent)
+
+        print("Intent:", intent)
+        print("Tools:", tools)
+
         # Search filters
         # location = None
         # bhk = None
@@ -104,18 +118,30 @@ def chat(request: ChatRequest):
         # if "2bhk" in message_lower or "2 bhk" in message_lower:
         #     bhk = 2
 
-        preferences = extract_preferences(request.message)
+        if "postgres_search" in tools:
 
-        location = preferences["location"]
-        bhk = preferences["bhk"]
-        budget = preferences["budget"]
+            preferences = extract_preferences(
+                request.message
+            )
 
-        properties = search_properties(
-            db,
-            location=location,
-            bhk=bhk,
-            max_price=budget
-        )
+            if isinstance(preferences, dict):
+
+                location = preferences.get("location")
+                bhk = preferences.get("bhk")
+                budget = preferences.get("budget")
+
+            else:
+
+                location = None
+                bhk = None
+                budget = None
+
+            properties = search_properties(
+                db,
+                location=location,
+                bhk=bhk,
+                max_price=budget
+            )
 
         all_properties = db.query(Property).all()
 
@@ -140,7 +166,7 @@ def chat(request: ChatRequest):
                 Title: {p.title}
                 Location: {p.location}
                 Price: ₹{p.price}
-                Description: {p.description}
+                Description: {p.description[:100]}
                 """
                 for p in semantic_results
             ])
@@ -148,29 +174,50 @@ def chat(request: ChatRequest):
             messages.append({
                 "role": "system",
                 "content": f"""
-Available properties:
+Properties:
 {property_text}
 """
             })
 
-            if document_index:
+        search_results = None
 
-                relevant_chunks = search_similar_chunks(
-                    request.message,
-                    document_chunks,
-                    document_index
-                )
+        if "chroma_rag_search" in tools:
 
-        chunk_text_content = "\n".join(relevant_chunks)
+            query_embedding = model.encode(
+                [request.message]
+            )
 
-        messages.append({
-            "role": "system",
-            "content": f"""
-Relevant document information:
+            # search_document will now return dict with lists even if empty
+            search_results = search_document(
+                query_embedding
+            )
+
+        # Ensure search_results has lists and is non-empty before using
+        if search_results and isinstance(search_results, dict) and len(search_results.get("documents", [])) > 0:
+            relevant_chunks = search_results.get("documents", [])
+            metadata_results = search_results.get("metadatas", [])
+
+            chunk_entries = []
+            for i in range(min(2, len(relevant_chunks))):
+                meta_source = metadata_results[i].get('source') if i < len(
+                    metadata_results) and isinstance(metadata_results[i], dict) else 'unknown'
+                chunk_entries.append(f"""
+Source: {meta_source}
+
+Content:
+{relevant_chunks[i]}
+""")
+
+            chunk_text_content = "\n".join(chunk_entries)
+
+            messages.append({
+                "role": "system",
+                "content": f"""
+Document Context:
 
 {chunk_text_content}
 """
-        })
+            })
 
         ai_response = ask_ai(messages)
 
@@ -270,9 +317,6 @@ def add_property(request: PropertyRequest):
 @app.post("/upload_pdf")
 def upload_pdf(file: UploadFile = File(...)):
 
-    global document_chunks
-    global document_index
-
     file_path = f"uploads/{file.filename}"
 
     with open(file_path, "wb") as buffer:
@@ -285,11 +329,11 @@ def upload_pdf(file: UploadFile = File(...)):
 
     embeddings = create_chunk_embeddings(chunks)
 
-    index = build_chunk_index(embeddings)
-
-    document_chunks = chunks
-
-    document_index = index
+    store_document_chunks(
+        chunks,
+        embeddings,
+        file.filename
+    )
 
     return {
         "message": "PDF processed successfully",
